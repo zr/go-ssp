@@ -2,11 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
+	"time"
+
+	"go.uber.org/multierr"
+	"golang.org/x/sync/errgroup"
 )
 
 type adRequest struct {
@@ -35,7 +40,8 @@ type winResponse struct {
 
 // SSP メインロジックの構造体
 type SSP struct {
-	bitResponses *[]bitResponse
+	hosts   *map[string]dspInfo
+	auction *[]bitResponse
 }
 
 type dspInfo struct {
@@ -70,30 +76,14 @@ func (s *SSP) AdHandler(w http.ResponseWriter, r *http.Request) {
 
 // SSPメインロジック
 func (s *SSP) run(adReq adRequest) (adResponse, error) {
+	if err := s.loadHosts(); err != nil {
+	}
+
 	// 1.DSPにgoroutineでリクエストを送る
-	hosts := s.loadHosts()
-	auction := []bitResponse{}
-
-	bitCh := make(chan bitResponse, 0)
-	for DSPID, host := range hosts {
-		bitRequest := &bitRequest{
-			AppID: adReq.AppID,
-			DSPID: DSPID,
-		}
-		go s.sendBit(bitCh, host.bitURL, bitRequest)
+	if err := s.runBit(adReq.AppID); err != nil {
 	}
 
-	// Todo: contextか何かでエラー処理
-	for range hosts {
-		select {
-		case bitRes, ok := <-bitCh:
-			if ok {
-				auction = append(auction, bitRes)
-			}
-		}
-	}
-	close(bitCh)
-
+	fmt.Printf("(%%#v) %#v\n", *s.auction)
 	// Todo: auctionがない(DSPがひとつもない)場合
 
 	var firstPrice int
@@ -101,7 +91,7 @@ func (s *SSP) run(adReq adRequest) (adResponse, error) {
 	var winner bitResponse
 
 	// 2. セカンドプライスオークションをする
-	for _, bitRes := range auction {
+	for _, bitRes := range *s.auction {
 		if firstPrice <= bitRes.Price {
 			winner = bitRes
 			firstPrice = bitRes.Price
@@ -118,6 +108,7 @@ func (s *SSP) run(adReq adRequest) (adResponse, error) {
 
 	// 3. Win通知を送り、URLを受け取る
 	winCh := make(chan winResponse, 0)
+	hosts := *s.hosts
 	go s.sendWin(winCh, hosts[winner.DSPID].winURL, winReq)
 	winRes, ok := <-winCh
 	if !ok {
@@ -132,44 +123,95 @@ func (s *SSP) run(adReq adRequest) (adResponse, error) {
 	return *res, nil
 }
 
-func (s *SSP) loadHosts() map[string]dspInfo {
+func (s *SSP) loadHosts() error {
 	baseURL := "http://localhost:8080"
 	dsp := dspInfo{
 		bitURL: baseURL + "/",
 		winURL: baseURL + "/win",
 	}
-	dspMap := map[string]dspInfo{
+	s.hosts = &map[string]dspInfo{
 		"1": dsp,
 		"2": dsp,
 		"3": dsp,
 	}
-	return dspMap
+	return nil
+}
+
+// runBit SSPがDSPに並列にbitをリクエストする
+func (s *SSP) runBit(AppID string) error {
+	var err error
+	auction := []bitResponse{}
+	bitCh := make(chan bitResponse, len(*s.hosts))
+
+	eg, ctx := errgroup.WithContext(context.Background())
+	ctx, cancel := context.WithTimeout(ctx, 2*1000*time.Millisecond)
+	defer cancel()
+
+	for DSPID, host := range *s.hosts {
+		h := host
+		bitReq := &bitRequest{
+			AppID: AppID,
+			DSPID: DSPID,
+		}
+		requestFunc := func() error {
+			bitRes, err := s.sendBit(ctx, bitCh, h.bitURL, bitReq)
+			if err != nil {
+				return err
+			}
+			bitCh <- bitRes
+			return nil
+		}
+		eg.Go(requestFunc)
+	}
+
+	if errLocal := eg.Wait(); errLocal != nil {
+		err = multierr.Append(err, errLocal)
+	}
+	if err != nil {
+		// ログ
+	}
+	close(bitCh)
+
+	for bitRes := range bitCh {
+		auction = append(auction, bitRes)
+	}
+	s.auction = &auction
+
+	return nil
 }
 
 // sendBit DSPに対してbitリクエストを送る
-func (s *SSP) sendBit(ch chan bitResponse, url string, bitReq *bitRequest) {
+func (s *SSP) sendBit(ctx context.Context, ch chan bitResponse, url string, bitReq *bitRequest) (bitResponse, error) {
+	// bitrequestをjsonにしてhostに送る
 	var bitRes bitResponse
-	if err := sendReq(url, bitReq, &bitRes); err != nil {
+	if err := sendReq(ctx, url, bitReq, &bitRes); err != nil {
+		return bitRes, err
 	}
-	ch <- bitRes
+	return bitRes, nil
 }
 
 // sendWin DSPに対してwinリクエストを送る
 func (s *SSP) sendWin(ch chan winResponse, url string, winReq *winRequest) {
 	var winRes winResponse
-	if err := sendReq(url, winReq, &winRes); err != nil {
+	// Todo: 別関数に
+	ctx, cancel := context.WithTimeout(context.Background(), 2*1000*time.Millisecond)
+	defer cancel()
+	if err := sendReq(ctx, url, winReq, &winRes); err != nil {
 	}
 	ch <- winRes
 }
 
 // sendReq jsonで送信し、規定の型に入れる
-func sendReq(url string, sendData interface{}, receiveData interface{}) error {
+func sendReq(ctx context.Context, url string, sendData interface{}, receiveData interface{}) error {
 	sendDataJSON, err := json.Marshal(&sendData)
 	if err != nil {
 		return err
 	}
 
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(sendDataJSON))
+	ctx, cancel := context.WithTimeout(ctx, 1*1000*time.Millisecond)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(sendDataJSON))
 	if err != nil {
 		return err
 	}
