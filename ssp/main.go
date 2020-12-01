@@ -51,11 +51,12 @@ type dspInfo struct {
 
 func main() {
 	addr := ":8000"
-	s := &SSP{}
+	s, err := NewSSP()
+	if err != nil {
+	}
 	http.HandleFunc("/", s.AdHandler)
 	log.Printf("SSP Server Listening on " + addr + " ...")
 	if err := http.ListenAndServe(addr, nil); err != nil {
-		// Todo: 500を返す
 	}
 }
 
@@ -72,6 +73,15 @@ func (s *SSP) AdHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewEncoder(w).Encode(adRes); err != nil {
 	}
+}
+
+// NewSSP SSPを作成
+func NewSSP() (*SSP, error) {
+	s := &SSP{}
+	if err := s.loadHosts(); err != nil {
+		return s, err
+	}
+	return s, nil
 }
 
 // SSPメインロジック
