@@ -84,16 +84,14 @@ func NewSSP() (*SSP, error) {
 	return s, nil
 }
 
-// SSPメインロジック
+// run SSPメインロジック
 func (s *SSP) run(adReq adRequest) (adResponse, error) {
-	if err := s.loadHosts(); err != nil {
-	}
-
 	// 1.DSPにgoroutineでリクエストを送る
 	if err := s.runBit(adReq.AppID); err != nil {
 	}
 
 	fmt.Printf("(%%#v) %#v\n", *s.auction)
+
 	// Todo: auctionがない(DSPがひとつもない)場合
 
 	var firstPrice int
@@ -127,10 +125,10 @@ func (s *SSP) run(adReq adRequest) (adResponse, error) {
 
 	fmt.Println(winRes)
 
-	res := &adResponse{
+	res := adResponse{
 		URL: winRes.URL,
 	}
-	return *res, nil
+	return res, nil
 }
 
 func (s *SSP) loadHosts() error {
