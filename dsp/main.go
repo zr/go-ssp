@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"math/rand"
@@ -33,6 +34,8 @@ type DSP struct {
 var rs1Letters = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
 
 func main() {
+	rand.Seed(time.Now().Unix())
+
 	addr := ":8080"
 	d := &DSP{}
 	http.HandleFunc("/", d.BitHandler)
@@ -44,6 +47,10 @@ func main() {
 
 // BitHandler SSPからのビットリクエストを処理する
 func (d *DSP) BitHandler(w http.ResponseWriter, r *http.Request) {
+	i := rand.Intn(2000)
+	fmt.Println(i)
+	time.Sleep(time.Duration(i) * time.Millisecond)
+
 	bitReq := bitRequest{}
 	req, err := ioutil.ReadAll(r.Body)
 	if err != nil {
@@ -53,6 +60,7 @@ func (d *DSP) BitHandler(w http.ResponseWriter, r *http.Request) {
 	bitRes, err := d.bit(bitReq)
 	if err != nil {
 	}
+	fmt.Printf("(%%#v) %#v\n", bitRes)
 	if err := json.NewEncoder(w).Encode(bitRes); err != nil {
 	}
 }
@@ -73,8 +81,6 @@ func (d *DSP) WinHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *DSP) bit(bitReq bitRequest) (*bitResponse, error) {
-	rand.Seed(time.Now().Unix())
-
 	return &bitResponse{
 		DSPID: bitReq.DSPID,
 		Price: rand.Intn(100),
@@ -82,7 +88,6 @@ func (d *DSP) bit(bitReq bitRequest) (*bitResponse, error) {
 }
 
 func (d *DSP) win(winReq winRequest) (*winResponse, error) {
-	rand.Seed(time.Now().Unix())
 	url := "http://" + randString(10) + ".com"
 
 	return &winResponse{
