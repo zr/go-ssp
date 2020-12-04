@@ -38,15 +38,17 @@ type winResponse struct {
 	URL string `json:"url"`
 }
 
-// SSP メインロジックの構造体
-type SSP struct {
-	hosts   *map[string]dspInfo
-	auction *[]bitResponse
-}
-
 type dspInfo struct {
 	bitURL string
 	winURL string
+}
+
+// SSP メインロジックの構造体
+type SSP struct {
+	hosts   map[string]dspInfo
+	auction []bitResponse
+	winReq  winRequest
+	adRes   adResponse
 }
 
 func main() {
@@ -86,49 +88,21 @@ func NewSSP() (*SSP, error) {
 
 // run SSPメインロジック
 func (s *SSP) run(adReq adRequest) (adResponse, error) {
-	// 1.DSPにgoroutineでリクエストを送る
+	// 1. DSPにgoroutineでリクエストを送る
 	if err := s.runBit(adReq.AppID); err != nil {
 	}
 
-	fmt.Printf("(%%#v) %#v\n", *s.auction)
+	fmt.Printf("(%%#v) %#v\n", s.auction)
 
-	// Todo: auctionがない(DSPがひとつもない)場合
-
-	var firstPrice int
-	var secondPrice int
-	var winner bitResponse
-
-	// 2. セカンドプライスオークションをする
-	for _, bitRes := range *s.auction {
-		if firstPrice <= bitRes.Price {
-			winner = bitRes
-			firstPrice = bitRes.Price
-		}
-		if secondPrice <= bitRes.Price && !(firstPrice == secondPrice) {
-			secondPrice = bitRes.Price
-		}
+	// 2. オークションを開く
+	if err := s.runAuction(); err != nil {
 	}
 
-	winReq := &winRequest{
-		DSPID: winner.DSPID,
-		Price: secondPrice,
+	// 3. Win通知を送り、広告URLを受け取る
+	if err := s.runWin(); err != nil {
 	}
 
-	// 3. Win通知を送り、URLを受け取る
-	winCh := make(chan winResponse, 0)
-	hosts := *s.hosts
-	go s.sendWin(winCh, hosts[winner.DSPID].winURL, winReq)
-	winRes, ok := <-winCh
-	if !ok {
-	}
-	close(winCh)
-
-	fmt.Println(winRes)
-
-	res := adResponse{
-		URL: winRes.URL,
-	}
-	return res, nil
+	return s.adRes, nil
 }
 
 func (s *SSP) loadHosts() error {
@@ -137,7 +111,7 @@ func (s *SSP) loadHosts() error {
 		bitURL: baseURL + "/",
 		winURL: baseURL + "/win",
 	}
-	s.hosts = &map[string]dspInfo{
+	s.hosts = map[string]dspInfo{
 		"1": dsp,
 		"2": dsp,
 		"3": dsp,
@@ -148,14 +122,13 @@ func (s *SSP) loadHosts() error {
 // runBit SSPがDSPに並列にbitをリクエストする
 func (s *SSP) runBit(AppID string) error {
 	var err error
-	auction := []bitResponse{}
-	bitCh := make(chan bitResponse, len(*s.hosts))
+	bitCh := make(chan bitResponse, len(s.hosts))
 
 	eg, ctx := errgroup.WithContext(context.Background())
 	ctx, cancel := context.WithTimeout(ctx, 2*1000*time.Millisecond)
 	defer cancel()
 
-	for DSPID, host := range *s.hosts {
+	for DSPID, host := range s.hosts {
 		h := host
 		bitReq := &bitRequest{
 			AppID: AppID,
@@ -181,9 +154,51 @@ func (s *SSP) runBit(AppID string) error {
 	close(bitCh)
 
 	for bitRes := range bitCh {
-		auction = append(auction, bitRes)
+		s.auction = append(s.auction, bitRes)
 	}
-	s.auction = &auction
+
+	return nil
+}
+
+// runAuction セカンドプライスオークションをする
+func (s *SSP) runAuction() error {
+	var firstPrice int
+	var secondPrice int
+	var winDSP bitResponse
+
+	for _, bitRes := range s.auction {
+		if firstPrice <= bitRes.Price {
+			winDSP = bitRes
+			firstPrice = bitRes.Price
+		}
+		if secondPrice <= bitRes.Price && !(firstPrice == secondPrice) {
+			secondPrice = bitRes.Price
+		}
+	}
+
+	// Todo: auctionがない(DSPがひとつもない)場合
+	// -> 自社の広告をセット
+
+	s.winReq = winRequest{
+		DSPID: winDSP.DSPID,
+		Price: secondPrice,
+	}
+
+	return nil
+}
+
+// runWin Win通知を送り、広告URLを受け取る
+func (s *SSP) runWin() error {
+	winCh := make(chan winResponse, 0)
+	go s.sendWin(winCh, s.hosts[s.winReq.DSPID].winURL, &s.winReq)
+	winRes, ok := <-winCh
+	if !ok {
+	}
+	close(winCh)
+
+	s.adRes = adResponse{
+		URL: winRes.URL,
+	}
 
 	return nil
 }
@@ -201,7 +216,6 @@ func (s *SSP) sendBit(ctx context.Context, ch chan bitResponse, url string, bitR
 // sendWin DSPに対してwinリクエストを送る
 func (s *SSP) sendWin(ch chan winResponse, url string, winReq *winRequest) {
 	var winRes winResponse
-	// Todo: 別関数に
 	ctx, cancel := context.WithTimeout(context.Background(), 2*1000*time.Millisecond)
 	defer cancel()
 	if err := sendReq(ctx, url, winReq, &winRes); err != nil {
